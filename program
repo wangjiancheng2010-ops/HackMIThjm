@@ -1,0 +1,130 @@
+#include <math.h>
+#include <Servo.h>
+
+volatile float input1;
+volatile float input2;
+volatile float input3;
+volatile float input4;
+volatile float input5;
+volatile float max_val;  
+volatile float max2_val; 
+Servo lightServo;
+
+// 舵机位置（固定传感器视角，180度扇形）
+const float SENSOR_ANGLES[5] = {0.0, 45.0, 90.0, 135.0, 180.0};
+
+// 滤波和上次位置记录
+static float smoothed_angle = 90.0;
+static int last_written_angle = -1;
+
+// ================= 超声波与人流量变量 =================
+const int PING_PIN = A0; // 将超声波信号线接在 A0
+int people_count = 0;
+bool is_person_present = false; // 状态锁：用来判断人是“刚经过”还是“一直站在那”
+// ======================================================
+
+void setup() {
+  Serial.begin(9600);
+  
+  lightServo.attach(6); 
+  lightServo.write(90); // 舵机初始归中
+  
+  max_val = 0;
+  max2_val = 0;
+}
+
+void loop() {
+  // ----------------- 1. 超声波单引脚测距与人流统计 -----------------
+  // 步骤 A：把 A0 设为输出模式，发送脉冲
+  pinMode(PING_PIN, OUTPUT);
+  digitalWrite(PING_PIN, LOW);
+  delayMicroseconds(2);
+  digitalWrite(PING_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(PING_PIN, LOW);
+
+  // 步骤 B：迅速把 A0 切换为输入模式，准备接收回波
+  pinMode(PING_PIN, INPUT);
+  long duration = pulseIn(PING_PIN, HIGH, 30000); // 30ms 超时限制
+  float distance = duration * 0.034 / 2.0;
+
+  // 人流量统计逻辑
+  if (distance > 0 && distance < 10.0) {
+    if (!is_person_present) {
+      people_count++;
+      is_person_present = true; // 记录为有人，防止同一个人被重复计数
+    }
+  } else {
+    is_person_present = false;  // 人离开了，重置状态
+  }
+
+  // ----------------- 2. 读取光敏传感器并计算角度 -----------------
+  // 用1023减去原始读数，数值越大代表光越强
+  input1 = 1023 - analogRead(A1);
+  input2 = 1023 - analogRead(A2);
+  input3 = 1023 - analogRead(A3);
+  input4 = 1023 - analogRead(A4);
+  input5 = 1023 - analogRead(A5);
+
+  float inputs[] = {input1, input2, input3, input4, input5};
+
+  float max1 = -1.0; 
+  float max2 = -1.0; 
+  int idx1 = -1; 
+  int idx2 = -1; 
+
+  // 找出光照最强和次强的位置
+  for (int i = 0; i < 5; i++) {
+    if (inputs[i] > max1) {
+      max2 = max1;
+      idx2 = idx1;
+      max1 = inputs[i];
+      idx1 = i;
+    } else if (inputs[i] > max2) {
+      max2 = inputs[i];
+      idx2 = i;
+    }
+  }
+
+  max_val = max1;
+  max2_val = max2;
+
+  // 向量分解与合成，算出具体角度
+  float rad1 = SENSOR_ANGLES[idx1] * PI / 180.0;
+  float rad2 = SENSOR_ANGLES[idx2] * PI / 180.0;
+
+  float x_vector = max1 * cos(rad1) + max2 * cos(rad2);
+  float y_vector = max1 * sin(rad1) + max2 * sin(rad2);
+
+  float target_rad = atan2(y_vector, x_vector);
+  float target_angle = target_rad * 180.0 / PI;
+  
+  if (target_angle < 0) {
+    target_angle = 0; 
+  }
+
+  // ----------------- 3. 控制 180度 标准舵机 -----------------
+  // 简单低通滤波，让舵机转得更平滑
+  smoothed_angle = smoothed_angle * 0.8 + target_angle * 0.2;
+
+  // 限制舵机角度在 10-170 度之间，防止撞坏机械限位
+  int current_servo_angle = constrain((int)smoothed_angle, 10, 170);
+
+  // 如果角度变化大于等于 2 度，才真正让舵机动，避免频繁微小抖动
+  if (abs(current_servo_angle - last_written_angle) >= 2) {
+    lightServo.write(current_servo_angle);
+    last_written_angle = current_servo_angle; 
+  }
+
+  // ----------------- 4. 串口输出调试数据 -----------------
+  Serial.print("Dist: ");
+  Serial.print(distance);
+  Serial.print("cm | People: ");
+  Serial.print(people_count);
+  Serial.print(" | Math Angle: ");
+  Serial.print(target_angle);
+  Serial.print(" | Servo Pos: ");
+  Serial.println(last_written_angle);
+
+  delay(150); 
+}
