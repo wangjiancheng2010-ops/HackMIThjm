@@ -1,0 +1,129 @@
+#include <math.h>
+#include <Servo.h>
+
+volatile float input1;
+volatile float input2;
+volatile float input3;
+volatile float input4;
+volatile float input5;
+volatile float max_val;  
+volatile float max2_val; 
+Servo lightServo;
+
+// 舵机位置（固定传感器视角，180度扇形）
+const float SENSOR_ANGLES[5] = {0.0, 45.0, 90.0, 135.0, 180.0};
+
+// 死区与滤波静态变量
+static float smoothed_angle = 90.0;
+static int last_written_angle = -1;
+
+// ================= 超声波与人流量变量 =================
+const int TRIG_PIN = 8; // 已修改为数字引脚 8
+const int ECHO_PIN = 9; // 已修改为数字引脚 9
+int people_count = 0;
+bool is_person_present = false; // 状态锁：切割连续的时间流
+// ======================================================
+
+void setup() {
+  Serial.begin(9600);
+  
+  lightServo.attach(6); 
+  lightServo.write(90); // 初始停靠在中立的虚无地带
+  
+  max_val = 0;
+  max2_val = 0;
+
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+}
+
+void loop() {
+  // ----------------- 1. 空间测距与人流切分 -----------------
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+
+  // 加上超时限制，不让主循环因为等待声波而停滞
+  long duration = pulseIn(ECHO_PIN, HIGH, 30000); 
+  float distance = duration * 0.034 / 2.0;
+
+  // 状态机：将混沌的距离波动，收敛为明确的进出事件
+  if (distance > 0 && distance < 10.0) {
+    if (!is_person_present) {
+      people_count++;
+      is_person_present = true; // 落下状态锁
+    }
+  } else {
+    is_person_present = false;  // 抬起状态锁
+  }
+
+  // ----------------- 2. 光源感知与数学推演 -----------------
+  input1 = 1023 - analogRead(A1);
+  input2 = 1023 - analogRead(A2);
+  input3 = 1023 - analogRead(A3);
+  input4 = 1023 - analogRead(A4);
+  input5 = 1023 - analogRead(A5);
+
+  float inputs[] = {input1, input2, input3, input4, input5};
+
+  float max1 = -1.0; 
+  float max2 = -1.0; 
+  int idx1 = -1; 
+  int idx2 = -1; 
+
+  for (int i = 0; i < 5; i++) {
+    if (inputs[i] > max1) {
+      max2 = max1;
+      idx2 = idx1;
+      max1 = inputs[i];
+      idx1 = i;
+    } else if (inputs[i] > max2) {
+      max2 = inputs[i];
+      idx2 = i;
+    }
+  }
+
+  max_val = max1;
+  max2_val = max2;
+
+  float rad1 = SENSOR_ANGLES[idx1] * PI / 180.0;
+  float rad2 = SENSOR_ANGLES[idx2] * PI / 180.0;
+
+  float x_vector = max1 * cos(rad1) + max2 * cos(rad2);
+  float y_vector = max1 * sin(rad1) + max2 * sin(rad2);
+
+  float target_rad = atan2(y_vector, x_vector);
+  float target_angle = target_rad * 180.0 / PI;
+  
+  // 在 180 度扇形结构中，抹除越界的虚影
+  if (target_angle < 0) {
+    target_angle = 0; 
+  }
+
+  // ----------------- 3. 绝对位置执行与机械保护 -----------------
+  // 低通滤波：用过去的惯性压制此刻的躁动
+  smoothed_angle = smoothed_angle * 0.8 + target_angle * 0.2;
+
+  // 物理界限：强行截断在 10 到 170 度之间，拒绝无意义的撞击
+  int current_servo_angle = constrain((int)smoothed_angle, 10, 170);
+
+  // 迟滞死区：剥离细碎的颤抖
+  if (abs(current_servo_angle - last_written_angle) >= 2) {
+    lightServo.write(current_servo_angle);
+    last_written_angle = current_servo_angle; 
+  }
+
+  // ----------------- 4. 终端输出 -----------------
+  Serial.print("Dist: ");
+  Serial.print(distance);
+  Serial.print("cm | People: ");
+  Serial.print(people_count);
+  Serial.print(" | Math Angle: ");
+  Serial.print(target_angle);
+  Serial.print(" | Servo Pos: ");
+  Serial.println(last_written_angle);
+
+  delay(150); 
+}
