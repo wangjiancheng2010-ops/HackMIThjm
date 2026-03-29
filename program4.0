@@ -1,0 +1,143 @@
+#include <math.h>
+#include <Servo.h>
+
+volatile float input1;
+volatile float input2;
+volatile float input3;
+volatile float input4;
+volatile float max_val;  
+volatile float max2_val; 
+Servo lightServo;
+
+// 舵机位置（4个传感器均匀切分180度视野，间隔60度）
+const float SENSOR_ANGLES[4] = {0.0, 60.0, 120.0, 180.0};
+
+// 舵机滤波和上次角度记录
+static float smoothed_angle = 90.0;
+static int last_written_angle = -1;
+
+// ================= 硬件引脚与变量 =================
+const int TRIG_PIN = 8; 
+const int ECHO_PIN = 9; 
+const int LED_PIN = 5; // 支持 PWM 调光的引脚
+
+int people_count = 0;
+bool is_person_present = false; 
+
+// LED 亮度的滤波变量
+static float smoothed_brightness = 0;
+// ======================================================
+
+void setup() {
+  Serial.begin(9600);
+  
+  lightServo.attach(6); 
+  lightServo.write(90); // 舵机初始归中
+  
+  max_val = 0;
+  max2_val = 0;
+
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+  pinMode(LED_PIN, OUTPUT); 
+}
+
+void loop() {
+  // ----------------- 1. 超声波测距与人流统计 -----------------
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+
+  long duration = pulseIn(ECHO_PIN, HIGH, 30000); 
+  float distance = duration * 0.034 / 2.0;
+
+  if (distance > 0 && distance < 10.0) {
+    if (!is_person_present) {
+      people_count++;
+      is_person_present = true; 
+    }
+  } else {
+    is_person_present = false;  
+  }
+
+  // ----------------- 2. 光敏传感器读取与角度计算 -----------------
+  input1 = analogRead(A2);
+  input2 = analogRead(A3);
+  input3 = analogRead(A4);
+  input4 = analogRead(A5);
+
+  float inputs[] = {input1, input2, input3, input4};
+
+  float max1 = -1.0; 
+  float max2 = -1.0; 
+  int idx1 = -1; 
+  int idx2 = -1; 
+
+  // 循环边界收缩至 4
+  for (int i = 0; i < 4; i++) {
+    if (inputs[i] > max1) {
+      max2 = max1;
+      idx2 = idx1;
+      max1 = inputs[i];
+      idx1 = i;
+    } else if (inputs[i] > max2) {
+      max2 = inputs[i];
+      idx2 = i;
+    }
+  }
+
+  max_val = max1;
+  max2_val = max2;
+
+  float rad1 = SENSOR_ANGLES[idx1] * PI / 180.0;
+  float rad2 = SENSOR_ANGLES[idx2] * PI / 180.0;
+
+  float x_vector = max1 * cos(rad1) + max2 * cos(rad2);
+  float y_vector = max1 * sin(rad1) + max2 * sin(rad2);
+
+  float target_rad = atan2(y_vector, x_vector);
+  float target_angle = target_rad * 180.0 / PI;
+  
+  if (target_angle < 0) {
+    target_angle = 0; 
+  }
+
+  // ----------------- 3. 舵机控制与滤波 -----------------
+  smoothed_angle = smoothed_angle * 0.8 + target_angle * 0.2;
+  int current_servo_angle = constrain((int)smoothed_angle, 10, 170);
+
+  if (abs(current_servo_angle - last_written_angle) >= 2) {
+    lightServo.write(current_servo_angle);
+    last_written_angle = current_servo_angle; 
+  }
+
+  // ----------------- 4. 灯光亮度计算与低通滤波 -----------------
+  float target_brightness = 0;
+
+  if (distance > 0 && distance < 10.0) {
+    target_brightness = map((int)max_val, 100, 800, 0, 255);
+    target_brightness = constrain(target_brightness, 0, 255);
+  }
+
+  smoothed_brightness = smoothed_brightness * 0.8 + target_brightness * 0.2;
+  analogWrite(LED_PIN, (int)smoothed_brightness);
+
+  // ----------------- 5. 串口监视器输出 -----------------
+  Serial.print("Sensors: [");
+  for (int i = 0; i < 4; i++) {
+    Serial.print(inputs[i]);
+    if (i < 3) Serial.print(", ");
+  }
+  Serial.print("] | Dist: ");
+  Serial.print(distance);
+  Serial.print("cm | People: ");
+  Serial.print(people_count);
+  Serial.print(" | LED PWM: ");
+  Serial.print((int)smoothed_brightness);
+  Serial.print(" | Servo: ");
+  Serial.println(last_written_angle);
+
+  delay(150); 
+}
